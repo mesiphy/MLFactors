@@ -25,7 +25,7 @@ MLFactors 当前已经不只是“因子挖掘骨架”，而是一个同时覆�
 uv venv
 source .venv/bin/activate
 
-uv pip install pandas numpy scipy scikit-learn matplotlib pyyaml loguru duckdb pyarrow plotly vectorbt pytest
+uv pip install pandas numpy scipy scikit-learn matplotlib loguru duckdb pyarrow plotly vectorbt pytest
 ```
 
 确认解释器：
@@ -44,9 +44,6 @@ MLFactors/
 │   ├── execution.py              # 撮合执行器与 SimulationResult
 │   ├── portfolio.py              # 仓位管理器
 │   └── qlib_adapter.py           # qlib 适配层（保留）
-├── config/
-│   ├── selection.yaml
-│   └── timing.yaml
 ├── data/
 │   ├── base.py                   # DataLoader 抽象基类
 │   ├── local_loader.py           # A 股目录 / 美股 SQLite 加载器

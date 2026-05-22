@@ -7,17 +7,23 @@ A 股因子测试脚本（本地数据）
   - volatility_20（20日波动率）
 
 用法：
-  python run_hs300_factor_test.py
+  ./.venv/bin/python run_hs300_factor_test.py
 
-关键参数（修改 config/selection.yaml 或直接改下方）：
-  data.cache_dir   : 本地数据根目录（与 fetcher 使用的 data_root 一致）
-  data.max_stocks  : 最多使用多少只股票（null = 不限制）
-  backtest.start_date / end_date : 回测区间
-  output.save_plots : 是否保存因子报告图到 outputs/ 目录
+常用参数：
+  --data-root    本地数据根目录（与 fetcher 使用的 data_root 一致）
+  --max-stocks   最多使用多少只股票，0 表示不限制
+  --start / --end 回测区间
+  --output-dir   报告输出目录
+  --no-plots     只输出汇总 CSV，不保存图表
 """
 from __future__ import annotations
 
+import argparse
+import os
 import sys
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
 import matplotlib
 matplotlib.use("Agg")  # 必须在导入 pyplot 前设置，避免无头环境弹窗
 
@@ -30,25 +36,28 @@ import duckdb
 import matplotlib.pyplot as plt
 from loguru import logger
 
-from config import get_config
 from data.local_loader import AStockLocalLoader
 from evaluation.plot import plot_factor_report
 from pipeline.selection_runner import SelectionPipeline
 
-# 从配置文件读取运行参数
-_cfg        = get_config()
-_data_cfg   = _cfg.get("data", {})
-_bt_cfg     = _cfg.get("backtest", {})
-_out_cfg    = _cfg.get("output", {})
-_eval_cfg   = _cfg.get("evaluation", {})
+DEFAULT_DATA_ROOT = "/home/setsu/workspace/MLFactors/cache"
+DEFAULT_START_DATE = "20240101"
+DEFAULT_END_DATE = "20260101"
+DEFAULT_OUTPUT_DIR = Path("outputs")
+DEFAULT_FACTORS = ["momentum_5", "momentum_20", "volatility_20"]
 
-DATA_ROOT   = _data_cfg.get("cache_dir", "./cache")
-START_DATE  = _bt_cfg.get("start_date", "20240101")
-END_DATE    = _bt_cfg.get("end_date",   "20260101")
-MAX_STOCKS  = _data_cfg.get("max_stocks", None)   # None = 不限制
-SAVE_PLOTS  = _out_cfg.get("save_plots", True)
-OUTPUT_DIR  = _out_cfg.get("dir", "outputs")
-PLOT_PERIOD = _eval_cfg.get("plot_period", None)  # None = 自动取 forward_periods[1]
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="运行 A 股选股因子级别测试")
+    parser.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
+    parser.add_argument("--start", default=DEFAULT_START_DATE)
+    parser.add_argument("--end", default=DEFAULT_END_DATE)
+    parser.add_argument("--max-stocks", type=int, default=300, help="0 表示不限制")
+    parser.add_argument("--factors", nargs="+", default=DEFAULT_FACTORS)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--plot-period", type=int, default=5)
+    parser.add_argument("--no-plots", action="store_true")
+    return parser.parse_args()
 
 
 # ── 1. 从元数据库读取股票列表 ─────────────────────────────────────────────
@@ -98,11 +107,12 @@ def get_symbols(
 # ── 2. 主流程 ────────────────────────────────────────────────────────────
 
 def main():
-    factors = ["momentum_5", "momentum_20", "volatility_20"]
-    output_dir = Path(OUTPUT_DIR) if SAVE_PLOTS else None
+    args = parse_args()
+    max_stocks = None if args.max_stocks == 0 else args.max_stocks
+    output_dir = args.output_dir if not args.no_plots else None
 
     # 读取股票列表
-    symbols = get_symbols(DATA_ROOT, START_DATE, END_DATE, max_stocks=MAX_STOCKS)
+    symbols = get_symbols(args.data_root, args.start, args.end, max_stocks=max_stocks)
     if not symbols:
         logger.error("股票列表为空，退出")
         return
@@ -110,16 +120,16 @@ def main():
     # 构建流水线：AStockLocalLoader 从本地文件加载行情
     pipeline = (
         SelectionPipeline()
-        .set_data_loader(AStockLocalLoader(data_root=DATA_ROOT))
-        .add_factors(factors)
+        .set_data_loader(AStockLocalLoader(data_root=args.data_root))
+        .add_factors(args.factors)
     )
 
     # run() 内部调用 loader.load_market_data(symbols, start, end)
     # 返回 dict[factor_name, FactorReport]
     reports = pipeline.run(
         symbols=symbols,
-        start=START_DATE,
-        end=END_DATE,
+        start=args.start,
+        end=args.end,
         show_plot=False,  # 手动保存，不弹窗
     )
 
@@ -130,8 +140,8 @@ def main():
         if output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
             cfg_periods = report.forward_periods
-            if PLOT_PERIOD is not None and PLOT_PERIOD in cfg_periods:
-                plot_period = PLOT_PERIOD
+            if args.plot_period in cfg_periods:
+                plot_period = args.plot_period
             else:
                 plot_period = cfg_periods[1] if len(cfg_periods) > 1 else cfg_periods[0]
 

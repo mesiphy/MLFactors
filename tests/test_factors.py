@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data.schema import Col
+from data.schema import Col, FundamentalCol
 from factors.base import BaseFactor
 from factors.registry import FactorRegistry, register_factor
 
@@ -32,6 +32,22 @@ def make_market_df(n_dates: int = 30, n_symbols: int = 5) -> pd.DataFrame:
             })
     df = pd.DataFrame(records)
     return df.set_index([Col.DATE, Col.SYMBOL]).sort_index()
+
+
+def make_fundamental_df(n_dates: int = 30, n_symbols: int = 5) -> pd.DataFrame:
+    dates = pd.date_range("2024-01-01", periods=n_dates, freq="B")
+    symbols = [f"S{i:03d}" for i in range(n_symbols)]
+    records = []
+    for d in dates:
+        for i, s in enumerate(symbols):
+            records.append({
+                FundamentalCol.DATE: d,
+                FundamentalCol.SYMBOL: s,
+                FundamentalCol.PB: 0.8 + i * 0.2,
+                "market_cap": 1_000_000_000.0 + i * 100_000_000.0,
+            })
+    df = pd.DataFrame(records)
+    return df.set_index([FundamentalCol.DATE, FundamentalCol.SYMBOL]).sort_index()
 
 
 # ── BaseFactor 接口测试 ───────────────────────────────────────────────────────
@@ -179,6 +195,7 @@ class TestBuiltinFactors:
         assert "momentum_5" in names
         assert "volatility_20" in names
         assert "highlow_spread_20" in names
+        assert "vff3" in names
 
     def test_momentum5_output_shape(self):
         mkt = self._mkt()
@@ -205,4 +222,12 @@ class TestBuiltinFactors:
         mkt = self._mkt()
         cls = FactorRegistry.get("highlow_spread_20")
         result = cls().generate_signals(mkt).stack().dropna()
+        assert (result >= 0).all()
+
+    def test_vff3_nonnegative(self):
+        mkt = self._mkt()
+        fundamental = make_fundamental_df(n_dates=40, n_symbols=5)
+        cls = FactorRegistry.get("vff3")
+        result = cls().generate_signals(mkt, fundamental).stack().dropna()
+        assert result.__len__() > 0
         assert (result >= 0).all()

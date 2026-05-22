@@ -78,7 +78,7 @@ def calc_icir(
     ----------
     ic_series : pd.Series，IC 时间序列
     period : int，前向收益的周期数（用于消除重叠自相关造成的虚高）
-    annualize : bool，是否年化（默认 True）
+    annualize : bool，是否年化（默认 False）
     periods_per_year : int，一年包含的交易日数（日频默认 252）
     """
     ic_clean = ic_series.dropna()
@@ -93,8 +93,8 @@ def calc_icir(
     
     # 3. 年化处理
     if annualize:
-        # 乘以 sqrt(252) 完成年化。
-        # 最终数学等价于：base_icir * sqrt(252 / period)
+        # 乘以 sqrt(periods_per_year) 完成年化。
+        # 最终数学等价于：base_icir * sqrt(periods_per_year / period)
         return adjusted_icir * np.sqrt(periods_per_year)
     else:
         return adjusted_icir

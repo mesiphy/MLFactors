@@ -61,3 +61,21 @@ class Momentum20(BaseFactor):
         signals.index.name = Col.DATE
         signals.columns.name = Col.SYMBOL
         return signals
+
+
+@register_factor
+class TimeSeriesMomentum252(BaseFactor):
+    name = "time_series_momentum_252"
+    description = "252日时间序列动量（近12个月收益率）"
+    category = "momentum"
+
+    def generate_signals(
+        self,
+        market_data: pd.DataFrame,
+        fundamental_data: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        prices = market_data[Col.CLOSE].unstack(Col.SYMBOL)
+        signals = prices.pct_change(252, fill_method=None)
+        signals.index.name = Col.DATE
+        signals.columns.name = Col.SYMBOL
+        return signals

@@ -31,7 +31,6 @@ from typing import Type
 import pandas as pd
 from loguru import logger
 
-from config import get_timing_config
 from data.base import DataLoader
 from evaluation.timimg.report import TimingReport
 from factors.base import BaseTimingFactor
@@ -49,7 +48,12 @@ class TimingPipeline:
     （通过链式调用配置，见各 set_* / add_factors 方法）
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        price_col: str = "close",
+        trading_days: int = 252,
+        risk_free: float = 0.0,
+    ) -> None:
         self._loader: DataLoader | None = None
         self._symbols: list[str] = []
         self._benchmark_symbol: str | None = None
@@ -58,11 +62,9 @@ class TimingPipeline:
 
         self._market_data: pd.DataFrame | None = None
 
-        cfg = get_timing_config()
-        _eval = cfg.get("evaluation", {})
-        self._price_col: str = _eval.get("timing_price_col", "close")
-        self._trading_days: int = _eval.get("timing_trading_days", 252)
-        self._risk_free: float = _eval.get("timing_risk_free", 0.0)
+        self._price_col = price_col
+        self._trading_days = trading_days
+        self._risk_free = risk_free
 
     # ------------------------------------------------------------------ #
     #  配置方法（链式调用）

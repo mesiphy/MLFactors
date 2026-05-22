@@ -323,6 +323,18 @@ class USStockLocalLoader(DataLoader):
         "current_ratio":       FundamentalCol.CURRENT_RATIO,
     }
 
+    # Temporary hard block: XAUUSD is a non-equity instrument currently stored
+    # under market="US". Keep it out of all US equity/ETF loaders until a
+    # dedicated asset-class loader is added.
+    _TEMPORARILY_BLOCKED_SYMBOLS: tuple[str, ...] = ("XAUUSD",)
+    _ETF_SYMBOLS: tuple[str, ...] = (
+        "AGG", "BND", "DIA", "EEM", "EFA", "GDX", "GLD", "IVV", "IWM", "IYR",
+        "LQD", "QQQ", "SCHH", "SLV", "SPY", "TLT", "USO", "UVXY", "VEA",
+        "VIXY", "VNQ", "VOO", "VTI", "VWO", "XLB", "XLC", "XLE", "XLF",
+        "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY", "XRT",
+    )
+    _NON_STOCK_SYMBOLS: tuple[str, ...] = _TEMPORARILY_BLOCKED_SYMBOLS + _ETF_SYMBOLS
+
     def __init__(self, db_path: str | Path, market: str = "US") -> None:
         self.db_path = Path(db_path).expanduser().resolve()
         self.market = market
@@ -355,14 +367,64 @@ class USStockLocalLoader(DataLoader):
         DataFrame，以 ``(date, symbol)`` 为 MultiIndex，包含
         open / high / low / close / volume / amount / adj_close 列。
         """
+        return self._load_bars(
+            symbols=symbols,
+            start=start,
+            end=end,
+            include_symbols=None,
+            exclude_symbols=self._NON_STOCK_SYMBOLS,
+            log_name="USStockLocalLoader.load_market_data",
+        )
+
+    def load_etf_market_data(
+        self,
+        symbols: list[str] | None = None,
+        start: str | date | None = None,
+        end: str | date | None = None,
+    ) -> pd.DataFrame:
+        """加载 ETF/ETP 日线行情。
+
+        该接口仅返回 ``_ETF_SYMBOLS`` 中的标的，且仍然屏蔽 ``XAUUSD``。
+        """
+        requested = tuple(symbols) if symbols else self._ETF_SYMBOLS
+        etf_symbols = tuple(symbol for symbol in requested if symbol in self._ETF_SYMBOLS)
+        if not etf_symbols:
+            return pd.DataFrame()
+
+        return self._load_bars(
+            symbols=None,
+            start=start,
+            end=end,
+            include_symbols=etf_symbols,
+            exclude_symbols=self._TEMPORARILY_BLOCKED_SYMBOLS,
+            log_name="USStockLocalLoader.load_etf_market_data",
+        )
+
+    def _load_bars(
+        self,
+        symbols: list[str] | tuple[str, ...] | None,
+        start: str | date | None,
+        end: str | date | None,
+        include_symbols: tuple[str, ...] | None,
+        exclude_symbols: tuple[str, ...],
+        log_name: str,
+    ) -> pd.DataFrame:
         # dt 存储为 ISO 8601 字符串，使用 SQLite date() 函数做日期比较
         conditions = ["market = ?", "frequency = '1d'"]
         params: list = [self.market]
 
+        if include_symbols:
+            placeholders = ",".join("?" * len(include_symbols))
+            conditions.append(f"symbol IN ({placeholders})")
+            params.extend(include_symbols)
         if symbols:
             placeholders = ",".join("?" * len(symbols))
             conditions.append(f"symbol IN ({placeholders})")
             params.extend(symbols)
+        if exclude_symbols:
+            placeholders = ",".join("?" * len(exclude_symbols))
+            conditions.append(f"symbol NOT IN ({placeholders})")
+            params.extend(exclude_symbols)
         if start is not None:
             conditions.append("date(dt) >= ?")
             params.append(str(pd.Timestamp(start).date()))
@@ -376,7 +438,7 @@ class USStockLocalLoader(DataLoader):
             f" FROM bars{where} ORDER BY dt, symbol"
         )
 
-        logger.debug("USStockLocalLoader.load_market_data query: {}", query)
+        logger.debug("{} query: {}", log_name, query)
         with self._connect() as conn:
             df = pd.read_sql_query(query, conn, params=params)
 
@@ -420,6 +482,10 @@ class USStockLocalLoader(DataLoader):
             placeholders = ",".join("?" * len(symbols))
             conditions.append(f"symbol IN ({placeholders})")
             params.extend(symbols)
+        if self._NON_STOCK_SYMBOLS:
+            placeholders = ",".join("?" * len(self._NON_STOCK_SYMBOLS))
+            conditions.append(f"symbol NOT IN ({placeholders})")
+            params.extend(self._NON_STOCK_SYMBOLS)
         if start is not None:
             conditions.append("dt >= ?")
             params.append(str(pd.Timestamp(start).date()))
@@ -447,4 +513,90 @@ class USStockLocalLoader(DataLoader):
         df[FundamentalCol.SYMBOL] = df[FundamentalCol.SYMBOL].astype(str)
 
         df = self._set_index(df)
-        return df
+        financials = self._load_financial_statement_fundamentals(symbols, start, end)
+        if financials.empty:
+            return df
+
+        combined = df.join(financials, how="outer", rsuffix="_financial")
+        for column in financials.columns:
+            financial_column = f"{column}_financial"
+            if financial_column not in combined.columns:
+                continue
+            combined[column] = combined[column].combine_first(combined[financial_column])
+            combined = combined.drop(columns=[financial_column])
+        return combined.sort_index()
+
+    def _load_financial_statement_fundamentals(
+        self,
+        symbols: list[str] | None = None,
+        start: str | date | None = None,
+        end: str | date | None = None,
+    ) -> pd.DataFrame:
+        conditions = ["CAST(fiscal_quarter AS INTEGER) BETWEEN 1 AND 4"]
+        params: list = []
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            conditions.append(f"symbol IN ({placeholders})")
+            params.extend(symbols)
+        if start is not None:
+            conditions.append("date(COALESCE(filing_date, report_date)) >= ?")
+            params.append(str(pd.Timestamp(start).date()))
+        if end is not None:
+            conditions.append("date(COALESCE(filing_date, report_date)) <= ?")
+            params.append(str(pd.Timestamp(end).date()))
+
+        where = " WHERE " + " AND ".join(conditions)
+        query = (
+            "SELECT symbol, COALESCE(filing_date, report_date) AS dt,"
+            " report_date, fiscal_year, fiscal_quarter, total_revenue,"
+            " net_income, diluted_eps, total_assets, shareholder_equity"
+            f" FROM financial_statements{where}"
+            " ORDER BY symbol, report_date, fiscal_year, fiscal_quarter"
+        )
+
+        logger.debug("USStockLocalLoader._load_financial_statement_fundamentals query: {}", query)
+        with self._connect() as conn:
+            df = pd.read_sql_query(query, conn, params=params)
+
+        if df.empty:
+            return pd.DataFrame()
+
+        df["fiscal_quarter"] = pd.to_numeric(df["fiscal_quarter"], errors="coerce")
+        df = df[df["fiscal_quarter"].between(1, 4)]
+        if df.empty:
+            return pd.DataFrame()
+
+        df[FundamentalCol.DATE] = pd.to_datetime(df["dt"])
+        df[FundamentalCol.SYMBOL] = df[FundamentalCol.SYMBOL].astype(str)
+        numeric_columns = [
+            "total_revenue",
+            "net_income",
+            "diluted_eps",
+            "total_assets",
+            "shareholder_equity",
+        ]
+        for column in numeric_columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+        df = df.sort_values([FundamentalCol.SYMBOL, FundamentalCol.DATE])
+        equity = df["shareholder_equity"].replace(0, pd.NA)
+        assets = df["total_assets"].replace(0, pd.NA)
+        df[FundamentalCol.ROE] = df["net_income"] / equity
+        df[FundamentalCol.ROA] = df["net_income"] / assets
+        df[FundamentalCol.EPS] = df["diluted_eps"]
+        df[FundamentalCol.REVENUE_GROWTH] = df.groupby(FundamentalCol.SYMBOL)["total_revenue"].pct_change(
+            fill_method=None,
+        )
+
+        result = df[
+            [
+                FundamentalCol.DATE,
+                FundamentalCol.SYMBOL,
+                FundamentalCol.ROE,
+                FundamentalCol.ROA,
+                FundamentalCol.EPS,
+                FundamentalCol.REVENUE_GROWTH,
+            ]
+        ]
+        result = result.drop_duplicates([FundamentalCol.DATE, FundamentalCol.SYMBOL], keep="last")
+        return self._set_index(result)

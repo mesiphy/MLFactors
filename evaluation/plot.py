@@ -65,11 +65,12 @@ def plot_ic_histogram(
 
 def plot_layered_returns(
     result: LayeredResult,
+    benchmark_cumulative: pd.DataFrame | None = None,
     title: str = "Layered Cumulative Returns",
     figsize: tuple = (14, 6),
     ax: plt.Axes | None = None,
 ) -> plt.Figure:
-    """分组累计收益曲线。"""
+    """分组累计收益曲线，可附加基准累计收益曲线。"""
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
     else:
@@ -80,8 +81,20 @@ def plot_layered_returns(
     for i, col in enumerate(cum.columns):
         ax.plot(cum.index, cum[col], label=f"Group {col}", color=cmap[i], linewidth=1.2)
 
-    ax.plot(result.long_short_cumulative.index, result.long_short_cumulative.values,
-            label="Long-Short", color="black", linewidth=2, linestyle="--")
+    if benchmark_cumulative is not None and not benchmark_cumulative.empty:
+        benchmark_colors = {"SPY": "black", "QQQ": "dimgray"}
+        for col in benchmark_cumulative.columns:
+            ax.plot(
+                benchmark_cumulative.index,
+                benchmark_cumulative[col],
+                label=f"{col} Benchmark",
+                color=benchmark_colors.get(str(col), "black"),
+                linewidth=2,
+                linestyle="--",
+            )
+    else:
+        ax.plot(result.long_short_cumulative.index, result.long_short_cumulative.values,
+                label="Long-Short", color="black", linewidth=2, linestyle="--")
     ax.set_title(title)
     ax.set_xlabel("Date")
     ax.set_ylabel("Cumulative Return")
@@ -116,6 +129,7 @@ def plot_factor_report(
     ic_series: pd.Series,
     layered_result: LayeredResult,
     decay_series: pd.Series | None = None,
+    benchmark_cumulative: pd.DataFrame | None = None,
     factor_name: str = "Factor",
     period: int | None = None,
     figsize: tuple = (16, 12),
@@ -129,7 +143,12 @@ def plot_factor_report(
 
     plot_ic_series(ic_series, title=f"IC Time Series (period={period}d)", ax=axes[0, 0])
     plot_ic_histogram(ic_series, title=f"IC Distribution (period={period}d)", ax=axes[0, 1])
-    plot_layered_returns(layered_result, title=f"Layered Returns (period={period}d)", ax=axes[1, 0])
+    plot_layered_returns(
+        layered_result,
+        benchmark_cumulative=benchmark_cumulative,
+        title=f"Layered Returns (period={period}d)",
+        ax=axes[1, 0],
+    )
 
     if decay_series is not None:
         plot_ic_decay(decay_series, title="IC Decay", ax=axes[1, 1])

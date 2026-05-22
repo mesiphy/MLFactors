@@ -161,3 +161,4 @@ class TestLocalLoaderSQLite:
         loader = LocalLoader()
         with pytest.raises(ValueError):
             loader.load_market_data()
+

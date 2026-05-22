@@ -95,7 +95,6 @@ class FactorRegistry:
         if cls._loaded:
             return
         cls._discover_builtin()
-        cls._discover_extra()
         cls._loaded = True
 
     @classmethod
@@ -118,12 +117,9 @@ class FactorRegistry:
                 logger.warning("加载因子模块 {} 失败: {}", full_name, e)
 
     @classmethod
-    def _discover_extra(cls) -> None:
-        """从配置中指定的额外路径加载因子模块。"""
-        from config import get_config
-
-        extra_paths = get_config().get("factors", {}).get("extra_paths", [])
-        for path_str in extra_paths:
+    def discover_extra(cls, paths: list[str | Path]) -> None:
+        """显式从额外路径加载因子模块。"""
+        for path_str in paths:
             path = Path(path_str)
             if not path.is_dir():
                 logger.warning("额外因子路径不存在: {}", path)
