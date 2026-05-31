@@ -13,9 +13,9 @@ from data.schema import Col, FundamentalCol
 class DataLoader(ABC):
     """所有数据加载器的基类。
 
-    子类需要实现 ``load_market_data`` 和（可选） ``load_fundamental_data``，
-    返回的 DataFrame 必须使用 ``Col`` / ``FundamentalCol`` 中定义的列名，
-    并以 ``(date, symbol)`` 为 MultiIndex 或包含 date、symbol 列。
+    子类需要实现 ``load_market_data``，并可实现 ``load_data`` 一次性返回
+    多张数据表。返回的 DataFrame 必须使用 ``Col`` / ``FundamentalCol`` 中
+    定义的列名，并以 ``(date, symbol)`` 为 MultiIndex 或包含 date、symbol 列。
     """
 
     # ------------------------------------------------------------------ #
@@ -50,6 +50,15 @@ class DataLoader(ABC):
     ) -> pd.DataFrame:
         """加载基本面数据（可选实现）。"""
         raise NotImplementedError("该数据源不支持基本面数据加载")
+
+    def load_data(
+        self,
+        symbols: list[str] | None = None,
+        start: str | date | None = None,
+        end: str | date | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """一次性加载数据表，返回以数据库表名为 key 的字典。"""
+        return {"market": self.load_market_data(symbols, start, end)}
 
     # ------------------------------------------------------------------ #
     #  通用工具方法

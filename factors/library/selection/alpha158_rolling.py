@@ -102,6 +102,32 @@ def _finalize(signals: pd.DataFrame) -> pd.DataFrame:
     return signals
 
 
+def _normalize_signal_dates(
+    signal_dates: pd.Index | pd.Series | pd.DataFrame | None,
+) -> pd.DatetimeIndex | None:
+    if signal_dates is None:
+        return None
+    if isinstance(signal_dates, pd.DataFrame):
+        values = signal_dates[Col.DATE] if Col.DATE in signal_dates.columns else signal_dates.index
+    elif isinstance(signal_dates, pd.Series):
+        values = signal_dates
+    else:
+        values = signal_dates
+    return pd.DatetimeIndex(pd.to_datetime(values)).tz_localize(None).unique().sort_values()
+
+
+def _align_to_signal_dates(
+    signals: pd.DataFrame,
+    signal_dates: pd.Index | pd.Series | pd.DataFrame | None,
+) -> pd.DataFrame:
+    dates = _normalize_signal_dates(signal_dates)
+    if dates is None:
+        return signals
+    aligned = signals.copy()
+    aligned.index = pd.DatetimeIndex(pd.to_datetime(aligned.index)).tz_localize(None)
+    return _finalize(aligned.reindex(dates))
+
+
 def _safe_divide(
     numerator: pd.DataFrame,
     denominator: pd.DataFrame | float,
@@ -313,10 +339,11 @@ class _Alpha158RollingFactor(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
-        return _compute_rolling_feature(market_data, self.prefix, self.window)
+        market_data = data["market"]
+        signals = _compute_rolling_feature(market_data, self.prefix, self.window)
+        return _align_to_signal_dates(signals, data.get("signal_dates"))
 
 
 def _make_factor_class(prefix: str, window: int) -> type[BaseFactor]:
@@ -339,4 +366,3 @@ def _make_factor_class(prefix: str, window: int) -> type[BaseFactor]:
 for _prefix in PREFIXES:
     for _window in WINDOWS:
         _make_factor_class(_prefix, _window)
-

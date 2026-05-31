@@ -29,15 +29,14 @@ class BaseFactor(ABC):
     @abstractmethod
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
         """生成选股信号矩阵。
 
         Parameters
         ----------
-        market_data : 行情数据 DataFrame，MultiIndex(date, symbol)
-        fundamental_data : 基本面数据 DataFrame，MultiIndex(date, symbol)，可选
+        data : 以数据库表名为 key 的数据字典，例如
+            ``market`` / ``etf`` / ``fundamental`` / ``statement`` / ``macro``。
 
         Returns
         -------
@@ -87,8 +86,7 @@ class BaseTimingFactor(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
         """择时因子不支持截面调用，请使用 ``compute_timing()``。"""
         raise NotImplementedError(

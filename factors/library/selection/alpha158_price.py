@@ -69,9 +69,9 @@ class Alpha158Open0(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         return _generate_price_ratio(market_data, Col.OPEN)
 
 
@@ -83,9 +83,9 @@ class Alpha158High0(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         return _generate_price_ratio(market_data, Col.HIGH)
 
 
@@ -97,9 +97,9 @@ class Alpha158Low0(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         return _generate_price_ratio(market_data, Col.LOW)
 
 
@@ -111,9 +111,9 @@ class Alpha158Vwap0(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         close = _unstack_panel(market_data, Col.CLOSE)
         vwap = _resolve_vwap_panel(market_data)
         return _safe_normalize(vwap, close)

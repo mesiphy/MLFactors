@@ -286,30 +286,25 @@ class AStockLocalLoader(DataLoader):
 
 
 # ====================================================================
-#  USStockLocalLoader — 从本地 SQLite（cta_orange.db）加载美股数据
+#  USStockLocalLoader — 从本地 SQLite（us.db）加载美股数据
 # ====================================================================
 
 class USStockLocalLoader(DataLoader):
-    """从本地 SQLite 数据库（cta_orange.db）加载美股行情和基本面数据。
+    """从本地 SQLite 数据库（us.db）加载美股数据。
 
     数据库结构
     ----------
-    - ``bars``        : 日线 OHLCV，字段 symbol/market/frequency/dt/open/high/low/close/volume/turnover/adjust_factor
-    - ``fundamentals``: 估值快照，字段 symbol/market/dt/pe_ratio/pb_ratio/ps_ratio/market_cap/roe/roa/...
+    - ``market``     : 股票日线 OHLCV，字段 symbol/dt/open/high/low/close/volume
+    - ``etf``        : ETF 日线 OHLCV，字段 symbol/dt/open/high/low/close/volume
+    - ``fundamental``: 估值快照，字段 symbol/dt/market_cap/pe_ratio/pb_ratio/...
+    - ``statement``  : 季度财报，字段 symbol/report_date/filing_date/revenue/net_income/...
+    - ``macro``      : 宏观时间序列，字段 series_id/dt/observation_date/value/...
 
     Parameters
     ----------
     db_path : SQLite 数据库文件路径。
-    market  : 市场过滤值，默认 ``"US"``，与 bars.market 列匹配。
     """
 
-    # bars 列名 → Col 标准列名
-    _BARS_COL_MAP: dict[str, str] = {
-        "dt":       Col.DATE,
-        "turnover": Col.AMOUNT,
-    }
-
-    # fundamentals 列名 → FundamentalCol 标准列名
     _FUND_COL_MAP: dict[str, str] = {
         "dt":                  FundamentalCol.DATE,
         "pe_ratio":            FundamentalCol.PE,
@@ -323,17 +318,7 @@ class USStockLocalLoader(DataLoader):
         "current_ratio":       FundamentalCol.CURRENT_RATIO,
     }
 
-    # Temporary hard block: XAUUSD is a non-equity instrument currently stored
-    # under market="US". Keep it out of all US equity/ETF loaders until a
-    # dedicated asset-class loader is added.
     _TEMPORARILY_BLOCKED_SYMBOLS: tuple[str, ...] = ("XAUUSD",)
-    _ETF_SYMBOLS: tuple[str, ...] = (
-        "AGG", "BND", "DIA", "EEM", "EFA", "GDX", "GLD", "IVV", "IWM", "IYR",
-        "LQD", "QQQ", "SCHH", "SLV", "SPY", "TLT", "USO", "UVXY", "VEA",
-        "VIXY", "VNQ", "VOO", "VTI", "VWO", "XLB", "XLC", "XLE", "XLF",
-        "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY", "XRT",
-    )
-    _NON_STOCK_SYMBOLS: tuple[str, ...] = _TEMPORARILY_BLOCKED_SYMBOLS + _ETF_SYMBOLS
 
     def __init__(self, db_path: str | Path, market: str = "US") -> None:
         self.db_path = Path(db_path).expanduser().resolve()
@@ -350,6 +335,26 @@ class USStockLocalLoader(DataLoader):
         finally:
             conn.close()
 
+    @staticmethod
+    def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+        return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    @staticmethod
+    def _date_bounds(
+        column: str,
+        start: str | date | None,
+        end: str | date | None,
+    ) -> tuple[list[str], list[str]]:
+        conditions: list[str] = []
+        params: list[str] = []
+        if start is not None:
+            conditions.append(f"date({column}) >= ?")
+            params.append(str(pd.Timestamp(start).date()))
+        if end is not None:
+            conditions.append(f"date({column}) <= ?")
+            params.append(str(pd.Timestamp(end).date()))
+        return conditions, params
+
     # ------------------------------------------------------------------ #
     #  行情数据
     # ------------------------------------------------------------------ #
@@ -360,19 +365,19 @@ class USStockLocalLoader(DataLoader):
         start: str | date | None = None,
         end: str | date | None = None,
     ) -> pd.DataFrame:
-        """从 ``bars`` 表加载日线行情（OHLCV）。
+        """加载日线行情（OHLCV）。
 
         Returns
         -------
         DataFrame，以 ``(date, symbol)`` 为 MultiIndex，包含
-        open / high / low / close / volume / amount / adj_close 列。
+        open / high / low / close / volume / adj_close 列。
         """
-        return self._load_bars(
+        return self._load_price_table(
+            table="market",
             symbols=symbols,
             start=start,
             end=end,
-            include_symbols=None,
-            exclude_symbols=self._NON_STOCK_SYMBOLS,
+            exclude_symbols=self._TEMPORARILY_BLOCKED_SYMBOLS,
             log_name="USStockLocalLoader.load_market_data",
         )
 
@@ -382,41 +387,28 @@ class USStockLocalLoader(DataLoader):
         start: str | date | None = None,
         end: str | date | None = None,
     ) -> pd.DataFrame:
-        """加载 ETF/ETP 日线行情。
-
-        该接口仅返回 ``_ETF_SYMBOLS`` 中的标的，且仍然屏蔽 ``XAUUSD``。
-        """
-        requested = tuple(symbols) if symbols else self._ETF_SYMBOLS
-        etf_symbols = tuple(symbol for symbol in requested if symbol in self._ETF_SYMBOLS)
-        if not etf_symbols:
-            return pd.DataFrame()
-
-        return self._load_bars(
-            symbols=None,
+        """从 ``etf`` 表加载 ETF/ETP 日线行情，仍屏蔽 XAUUSD。"""
+        return self._load_price_table(
+            table="etf",
+            symbols=symbols,
             start=start,
             end=end,
-            include_symbols=etf_symbols,
             exclude_symbols=self._TEMPORARILY_BLOCKED_SYMBOLS,
             log_name="USStockLocalLoader.load_etf_market_data",
         )
 
-    def _load_bars(
+    def _load_price_table(
         self,
+        table: str,
         symbols: list[str] | tuple[str, ...] | None,
         start: str | date | None,
         end: str | date | None,
-        include_symbols: tuple[str, ...] | None,
         exclude_symbols: tuple[str, ...],
         log_name: str,
     ) -> pd.DataFrame:
-        # dt 存储为 ISO 8601 字符串，使用 SQLite date() 函数做日期比较
-        conditions = ["market = ?", "frequency = '1d'"]
-        params: list = [self.market]
+        conditions: list[str] = []
+        params: list = []
 
-        if include_symbols:
-            placeholders = ",".join("?" * len(include_symbols))
-            conditions.append(f"symbol IN ({placeholders})")
-            params.extend(include_symbols)
         if symbols:
             placeholders = ",".join("?" * len(symbols))
             conditions.append(f"symbol IN ({placeholders})")
@@ -432,10 +424,10 @@ class USStockLocalLoader(DataLoader):
             conditions.append("date(dt) <= ?")
             params.append(str(pd.Timestamp(end).date()))
 
-        where = " WHERE " + " AND ".join(conditions)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         query = (
-            "SELECT symbol, dt, open, high, low, close, volume, turnover, adjust_factor"
-            f" FROM bars{where} ORDER BY dt, symbol"
+            "SELECT symbol, dt, open, high, low, close, volume"
+            f" FROM {table}{where} ORDER BY dt, symbol"
         )
 
         logger.debug("{} query: {}", log_name, query)
@@ -445,17 +437,11 @@ class USStockLocalLoader(DataLoader):
         if df.empty:
             return pd.DataFrame()
 
-        df = df.rename(columns=self._BARS_COL_MAP)
-        df[Col.DATE]   = pd.to_datetime(df[Col.DATE])
+        df = df.rename(columns={"dt": Col.DATE})
+        df[Col.DATE] = pd.to_datetime(df[Col.DATE])
         df[Col.SYMBOL] = df[Col.SYMBOL].astype(str)
-
-        # 计算复权收盘价
-        if "adjust_factor" in df.columns:
-            df[Col.ADJ_CLOSE] = (df[Col.CLOSE] * df["adjust_factor"]).round(6)
-            df = df.drop(columns=["adjust_factor"])
-
-        df = self._set_index(df)
-        return df
+        df[Col.ADJ_CLOSE] = df[Col.CLOSE]
+        return self._set_index(df)
 
     # ------------------------------------------------------------------ #
     #  基本面数据
@@ -467,7 +453,7 @@ class USStockLocalLoader(DataLoader):
         start: str | date | None = None,
         end: str | date | None = None,
     ) -> pd.DataFrame:
-        """从 ``fundamentals`` 表加载估值快照数据。
+        """从 ``fundamental`` 表加载估值快照数据。
 
         Returns
         -------
@@ -475,17 +461,36 @@ class USStockLocalLoader(DataLoader):
         pe / pb / ps / roe / roa / gross_margin / profit_growth /
         debt_ratio / current_ratio / market_cap 列。
         """
-        conditions = ["market = ?"]
-        params: list = [self.market]
+        with self._connect() as conn:
+            df = self._load_fundamental_table(conn, symbols, start, end)
+
+        if df.empty:
+            return pd.DataFrame()
+
+        df = df.rename(columns=self._FUND_COL_MAP)
+        df[FundamentalCol.DATE] = pd.to_datetime(df[FundamentalCol.DATE])
+        df[FundamentalCol.SYMBOL] = df[FundamentalCol.SYMBOL].astype(str)
+        return self._set_index(df)
+
+    def _load_fundamental_table(
+        self,
+        conn: sqlite3.Connection,
+        symbols: list[str] | None,
+        start: str | date | None,
+        end: str | date | None,
+    ) -> pd.DataFrame:
+        table = "fundamental"
+        conditions: list[str] = []
+        params: list = []
 
         if symbols:
             placeholders = ",".join("?" * len(symbols))
             conditions.append(f"symbol IN ({placeholders})")
             params.extend(symbols)
-        if self._NON_STOCK_SYMBOLS:
-            placeholders = ",".join("?" * len(self._NON_STOCK_SYMBOLS))
+        if self._TEMPORARILY_BLOCKED_SYMBOLS:
+            placeholders = ",".join("?" * len(self._TEMPORARILY_BLOCKED_SYMBOLS))
             conditions.append(f"symbol NOT IN ({placeholders})")
-            params.extend(self._NON_STOCK_SYMBOLS)
+            params.extend(self._TEMPORARILY_BLOCKED_SYMBOLS)
         if start is not None:
             conditions.append("dt >= ?")
             params.append(str(pd.Timestamp(start).date()))
@@ -493,110 +498,101 @@ class USStockLocalLoader(DataLoader):
             conditions.append("dt <= ?")
             params.append(str(pd.Timestamp(end).date()))
 
-        where = " WHERE " + " AND ".join(conditions)
-        query = (
-            "SELECT symbol, dt, pe_ratio, pb_ratio, ps_ratio, market_cap,"
-            " roe, roa, gross_profit_margin, profit_growth_rate,"
-            " debt_to_asset, current_ratio"
-            f" FROM fundamentals{where} ORDER BY dt, symbol"
-        )
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        columns = self._table_columns(conn, table)
+        wanted = [
+            "symbol",
+            "dt",
+            "pe_ratio",
+            "pb_ratio",
+            "ps_ratio",
+            "market_cap",
+            "roe",
+            "roa",
+            "gross_profit_margin",
+            "profit_growth_rate",
+            "debt_to_asset",
+            "current_ratio",
+        ]
+        selected = [column for column in wanted if column in columns]
+        query = f"SELECT {', '.join(selected)} FROM {table}{where} ORDER BY dt, symbol"
 
         logger.debug("USStockLocalLoader.load_fundamental_data query: {}", query)
-        with self._connect() as conn:
-            df = pd.read_sql_query(query, conn, params=params)
+        return pd.read_sql_query(query, conn, params=params)
 
-        if df.empty:
-            return pd.DataFrame()
-
-        df = df.rename(columns=self._FUND_COL_MAP)
-        df[FundamentalCol.DATE]   = pd.to_datetime(df[FundamentalCol.DATE])
-        df[FundamentalCol.SYMBOL] = df[FundamentalCol.SYMBOL].astype(str)
-
-        df = self._set_index(df)
-        financials = self._load_financial_statement_fundamentals(symbols, start, end)
-        if financials.empty:
-            return df
-
-        combined = df.join(financials, how="outer", rsuffix="_financial")
-        for column in financials.columns:
-            financial_column = f"{column}_financial"
-            if financial_column not in combined.columns:
-                continue
-            combined[column] = combined[column].combine_first(combined[financial_column])
-            combined = combined.drop(columns=[financial_column])
-        return combined.sort_index()
-
-    def _load_financial_statement_fundamentals(
+    def load_statement_data(
         self,
         symbols: list[str] | None = None,
         start: str | date | None = None,
         end: str | date | None = None,
     ) -> pd.DataFrame:
-        conditions = ["CAST(fiscal_quarter AS INTEGER) BETWEEN 1 AND 4"]
+        """从 ``statement`` 表加载财报数据，以 filing_date 作为 date 索引。"""
+        conditions: list[str] = []
         params: list = []
         if symbols:
             placeholders = ",".join("?" * len(symbols))
             conditions.append(f"symbol IN ({placeholders})")
             params.extend(symbols)
-        if start is not None:
-            conditions.append("date(COALESCE(filing_date, report_date)) >= ?")
-            params.append(str(pd.Timestamp(start).date()))
-        if end is not None:
-            conditions.append("date(COALESCE(filing_date, report_date)) <= ?")
-            params.append(str(pd.Timestamp(end).date()))
+        if self._TEMPORARILY_BLOCKED_SYMBOLS:
+            placeholders = ",".join("?" * len(self._TEMPORARILY_BLOCKED_SYMBOLS))
+            conditions.append(f"symbol NOT IN ({placeholders})")
+            params.extend(self._TEMPORARILY_BLOCKED_SYMBOLS)
+        conditions.append("filing_date IS NOT NULL")
+        date_conditions, date_params = self._date_bounds("filing_date", start, end)
+        conditions.extend(date_conditions)
+        params.extend(date_params)
 
-        where = " WHERE " + " AND ".join(conditions)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         query = (
-            "SELECT symbol, COALESCE(filing_date, report_date) AS dt,"
-            " report_date, fiscal_year, fiscal_quarter, total_revenue,"
-            " net_income, diluted_eps, total_assets, shareholder_equity"
-            f" FROM financial_statements{where}"
-            " ORDER BY symbol, report_date, fiscal_year, fiscal_quarter"
+            "SELECT *, filing_date AS date "
+            f"FROM statement{where} ORDER BY date, symbol"
         )
-
-        logger.debug("USStockLocalLoader._load_financial_statement_fundamentals query: {}", query)
+        logger.debug("USStockLocalLoader.load_statement_data query: {}", query)
         with self._connect() as conn:
             df = pd.read_sql_query(query, conn, params=params)
 
         if df.empty:
             return pd.DataFrame()
 
-        df["fiscal_quarter"] = pd.to_numeric(df["fiscal_quarter"], errors="coerce")
-        df = df[df["fiscal_quarter"].between(1, 4)]
+        df[Col.DATE] = pd.to_datetime(df[Col.DATE])
+        df[Col.SYMBOL] = df[Col.SYMBOL].astype(str)
+        return self._set_index(df)
+
+    def load_macro_data(
+        self,
+        start: str | date | None = None,
+        end: str | date | None = None,
+    ) -> pd.DataFrame:
+        """从 ``macro`` 表加载宏观数据，以发布日期 dt 作为 date 索引。"""
+        conditions, params = self._date_bounds("dt", start, end)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = (
+            "SELECT series_id, dt AS date, observation_date, value, units, updated_at "
+            f"FROM macro{where} ORDER BY dt, series_id, observation_date"
+        )
+        logger.debug("USStockLocalLoader.load_macro_data query: {}", query)
+        with self._connect() as conn:
+            df = pd.read_sql_query(query, conn, params=params)
+
         if df.empty:
             return pd.DataFrame()
 
-        df[FundamentalCol.DATE] = pd.to_datetime(df["dt"])
-        df[FundamentalCol.SYMBOL] = df[FundamentalCol.SYMBOL].astype(str)
-        numeric_columns = [
-            "total_revenue",
-            "net_income",
-            "diluted_eps",
-            "total_assets",
-            "shareholder_equity",
-        ]
-        for column in numeric_columns:
-            df[column] = pd.to_numeric(df[column], errors="coerce")
+        df[Col.DATE] = pd.to_datetime(df[Col.DATE])
+        df["observation_date"] = pd.to_datetime(df["observation_date"])
+        df["series_id"] = df["series_id"].astype(str)
+        return df.set_index([Col.DATE, "series_id"]).sort_index()
 
-        df = df.sort_values([FundamentalCol.SYMBOL, FundamentalCol.DATE])
-        equity = df["shareholder_equity"].replace(0, pd.NA)
-        assets = df["total_assets"].replace(0, pd.NA)
-        df[FundamentalCol.ROE] = df["net_income"] / equity
-        df[FundamentalCol.ROA] = df["net_income"] / assets
-        df[FundamentalCol.EPS] = df["diluted_eps"]
-        df[FundamentalCol.REVENUE_GROWTH] = df.groupby(FundamentalCol.SYMBOL)["total_revenue"].pct_change(
-            fill_method=None,
-        )
-
-        result = df[
-            [
-                FundamentalCol.DATE,
-                FundamentalCol.SYMBOL,
-                FundamentalCol.ROE,
-                FundamentalCol.ROA,
-                FundamentalCol.EPS,
-                FundamentalCol.REVENUE_GROWTH,
-            ]
-        ]
-        result = result.drop_duplicates([FundamentalCol.DATE, FundamentalCol.SYMBOL], keep="last")
-        return self._set_index(result)
+    def load_data(
+        self,
+        symbols: list[str] | None = None,
+        start: str | date | None = None,
+        end: str | date | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """一次性返回 us.db 各表数据，key 与数据库表名一致。"""
+        return {
+            "market": self.load_market_data(symbols, start, end),
+            "etf": self.load_etf_market_data(None, start, end),
+            "fundamental": self.load_fundamental_data(symbols, start, end),
+            "statement": self.load_statement_data(symbols, start, end),
+            "macro": self.load_macro_data(start, end),
+        }

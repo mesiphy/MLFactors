@@ -52,6 +52,8 @@ def calc_ic_series(
         returns_df = returns_df.iloc[:, 0]
 
     combined = pd.DataFrame({"factor": factor_df, "returns": returns_df}).dropna()
+    if combined.empty:
+        return pd.Series(dtype=float, name="IC")
 
     # 核心优化：使用 groupby 替代 for 循环，速度提升显著
     def _cross_sectional_ic(df):

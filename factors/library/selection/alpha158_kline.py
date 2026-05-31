@@ -47,9 +47,9 @@ class Alpha158Kmid(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, _, _, close = _extract_price_panels(market_data)
         return _safe_divide(close - open_, open_)
 
@@ -62,9 +62,9 @@ class Alpha158Klen(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, high, low, _ = _extract_price_panels(market_data)
         return _safe_divide(_intraday_range(high, low), open_)
 
@@ -77,9 +77,9 @@ class Alpha158Kmid2(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, high, low, close = _extract_price_panels(market_data)
         return _safe_divide(close - open_, _intraday_range(high, low))
 
@@ -92,9 +92,9 @@ class Alpha158Kup(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, high, _, close = _extract_price_panels(market_data)
         upper_shadow = high - _upper_body_edge(open_, close)
         return _safe_divide(upper_shadow, open_)
@@ -108,9 +108,9 @@ class Alpha158Kup2(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, high, low, close = _extract_price_panels(market_data)
         upper_shadow = high - _upper_body_edge(open_, close)
         return _safe_divide(upper_shadow, _intraday_range(high, low))
@@ -124,9 +124,9 @@ class Alpha158Klow(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, _, low, close = _extract_price_panels(market_data)
         lower_shadow = _lower_body_edge(open_, close) - low
         return _safe_divide(lower_shadow, open_)
@@ -140,9 +140,9 @@ class Alpha158Klow2(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, high, low, close = _extract_price_panels(market_data)
         lower_shadow = _lower_body_edge(open_, close) - low
         return _safe_divide(lower_shadow, _intraday_range(high, low))
@@ -156,9 +156,9 @@ class Alpha158Ksft(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, high, low, close = _extract_price_panels(market_data)
         return _safe_divide(2 * close - high - low, open_)
 
@@ -171,8 +171,8 @@ class Alpha158Ksft2(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
+        market_data = data["market"]
         open_, high, low, close = _extract_price_panels(market_data)
         return _safe_divide(2 * close - high - low, _intraday_range(high, low))

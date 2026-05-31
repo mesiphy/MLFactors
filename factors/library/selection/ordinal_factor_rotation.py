@@ -7,7 +7,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from data.schema import Col, FundamentalCol
+from data.schema import Col
 from factors.base import BaseFactor
 from factors.registry import register_factor
 from . import alpha158_kline, alpha158_price, alpha158_rolling
@@ -34,210 +34,33 @@ def _alpha158_factor_class_map() -> dict[str, type[BaseFactor]]:
 
 
 @register_factor
-class OrdinalFactorRotation(BaseFactor):
-    name = "ordinal_factor_rotation"
-    description = "基于市场变量的有效因子序数回归轮动"
+class OrdinalFactorRotationEnhance(BaseFactor):
+    name = "ordinal_factor_rotation_enhance"
+    description = "基于 Alpha158 月频子因子的序数回归轮动"
     category = "composite"
 
-    ETF_SYMBOLS = [
-        "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU",
-        "XLRE", "XLC", "SPY", "QQQ", "IWM", "DIA",
+    FACTOR_NAMES = [
+        "alpha158_std60",
+        "alpha158_klen",
+        "alpha158_std20",
+        "alpha158_std30",
+        "alpha158_kup",
+        "alpha158_high0",
+        "alpha158_std10",
+        "alpha158_std5",
+        "alpha158_max5",
+        "alpha158_max10",
     ]
     GROWTH_ETFS = ["XLK", "XLY", "XLC"]
     DEFENSIVE_ETFS = ["XLP", "XLU", "XLV"]
     CYCLICAL_ETFS = ["XLF", "XLI", "XLE", "XLB"]
 
-    FACTOR_NAMES = [
-        "roe",
-        "delta_roa",
-        "delta_roe",
-        "delta_eps",
-        "revenue_growth",
-        "pb",
-        "reversal_1m",
-        "reversal_3m",
-        "reversal_6m",
-        "dif",
-        "dea",
-    ]
-    TRAIN_WINDOW = 252
+    TRAIN_WINDOW = 60
+    WEIGHT_UPDATE_INTERVAL = 1
     TOP_QUANTILE = 0.2
     TOP_FRAC = 0.5
-    # 当前版本保持日频信号，仅每 WEIGHT_UPDATE_INTERVAL 个交易日更新一次权重。
-    WEIGHT_UPDATE_INTERVAL = 21
-    MONTHLY_TRAIN_WINDOW = 60
-    MONTHLY_WEIGHT_UPDATE_INTERVAL = 1
-    FUNDAMENTAL_DELTA_WINDOW = 63
     MIN_AVAILABLE_FACTORS = 5
     MIN_STOCK_FACTORS = 3
-
-    def generate_signals(
-        self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
-    ) -> pd.DataFrame:
-        close_all_daily = market_data[Col.CLOSE].unstack(Col.SYMBOL).sort_index()
-
-        monthly_market = self._to_monthly_market_data(market_data)
-        close_all = monthly_market[Col.CLOSE].unstack(Col.SYMBOL).sort_index()
-        volume_all = self._unstack_optional(monthly_market, Col.VOLUME)
-        if volume_all is not None:
-            volume_all = volume_all.reindex(index=close_all.index, columns=close_all.columns)
-
-        # DataFrame 列索引必须保留原始 symbol 对象，ETF 判断只在比较时转 str。
-        all_symbols = list(close_all.columns)
-        etf_symbols = [symbol for symbol in all_symbols if self._is_etf_symbol(str(symbol))]
-        stock_symbols = [symbol for symbol in all_symbols if symbol not in etf_symbols]
-        if not stock_symbols:
-            raise ValueError("ordinal_factor_rotation 无可用股票标的")
-
-        close_daily = close_all_daily[stock_symbols]
-        close = close_all[stock_symbols]
-        daily_factor_dict = self._compute_sub_factors(market_data, fundamental_data, close_daily)
-        factor_dict = {
-            name: factor.reindex(index=close.index, columns=close.columns)
-            for name, factor in daily_factor_dict.items()
-        }
-        available = [name for name, factor in factor_dict.items() if not factor.dropna(how="all").empty]
-        if len(available) < self.MIN_AVAILABLE_FACTORS:
-            raise ValueError(
-                f"ordinal_factor_rotation 可用子因子不足: {len(available)} < {self.MIN_AVAILABLE_FACTORS}"
-            )
-
-        # 月末因子值对应下一月月末 close-to-close 收益，用于月频序数回归。
-        stock_returns_forward = close.pct_change(fill_method=None).shift(-1)
-        market_features = self._build_monthly_market_features(close_all, volume_all, etf_symbols)
-        factor_returns = self._compute_factor_returns(
-            factor_dict,
-            stock_returns_forward,
-            top_quantile=self.TOP_QUANTILE,
-        )
-        factor_ranks = self._factor_returns_to_ranks(factor_returns)
-        factor_weights = self._compute_dynamic_factor_weights(
-            factor_returns,
-            factor_ranks,
-            market_features,
-            train_window=self.MONTHLY_TRAIN_WINDOW,
-            update_interval=self.MONTHLY_WEIGHT_UPDATE_INTERVAL,
-        )
-        signals = self._combine_factor_signals(factor_dict, factor_weights)
-        signals = signals.reindex(index=close.index, columns=stock_symbols)
-        signals.index.name = Col.DATE
-        signals.columns.name = Col.SYMBOL
-
-        self.last_monthly_market_data = monthly_market
-        self.last_market_features = market_features
-        self.last_factor_dict = factor_dict
-        self.last_factor_returns = factor_returns
-        self.last_factor_ranks = factor_ranks
-        self.last_factor_weights = factor_weights
-        return signals
-
-    @classmethod
-    def _is_etf_symbol(cls, symbol: str) -> bool:
-        return str(symbol).upper() in {item.upper() for item in cls.ETF_SYMBOLS}
-
-    def _compute_sub_factors(
-        self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None,
-        close: pd.DataFrame,
-    ) -> dict[str, pd.DataFrame]:
-        blank = pd.DataFrame(np.nan, index=close.index, columns=close.columns)
-        fundamentals = self._align_fundamentals(fundamental_data, close)
-
-        roe = self._fundamental_panel(fundamentals, FundamentalCol.ROE, close)
-        roa = self._fundamental_panel(fundamentals, FundamentalCol.ROA, close)
-        eps = self._fundamental_panel(fundamentals, FundamentalCol.EPS, close)
-        pb = self._fundamental_panel(fundamentals, FundamentalCol.PB, close)
-        revenue_growth = self._fundamental_panel(fundamentals, FundamentalCol.REVENUE_GROWTH, close)
-        revenue = self._first_available_fundamental(fundamentals, ["revenue", "operating_revenue"], close)
-
-        raw_momentum_1m = close.pct_change(21, fill_method=None)
-        raw_momentum_3m = close.pct_change(63, fill_method=None)
-        raw_momentum_6m = close.pct_change(126, fill_method=None)
-        dif = close.ewm(span=12, adjust=False, min_periods=12).mean() - close.ewm(
-            span=26,
-            adjust=False,
-            min_periods=26,
-        ).mean()
-        dea = dif.ewm(span=9, adjust=False, min_periods=9).mean()
-        pb_clean = pb.where(pb > 0) if pb is not None else None
-
-        factors = {
-            "roe": roe if roe is not None else blank.copy(),
-            # 基本面已前向填充到日频，1 日 diff 会大量为 0；63 日近似季度变化。
-            "delta_roa": roa - roa.shift(self.FUNDAMENTAL_DELTA_WINDOW) if roa is not None else blank.copy(),
-            "delta_roe": roe - roe.shift(self.FUNDAMENTAL_DELTA_WINDOW) if roe is not None else blank.copy(),
-            "delta_eps": eps - eps.shift(self.FUNDAMENTAL_DELTA_WINDOW) if eps is not None else blank.copy(),
-            "revenue_growth": revenue_growth if revenue_growth is not None else self._revenue_growth(revenue, blank),
-            # PB <= 0 不是有效估值信号，避免 -PB 形成异常正向极值。
-            "pb": -pb_clean if pb_clean is not None else blank.copy(),
-            "reversal_1m": -raw_momentum_1m,
-            "reversal_3m": -raw_momentum_3m,
-            "reversal_6m": -raw_momentum_6m,
-            "dif": dif,
-            "dea": dea,
-        }
-        return {name: factor.reindex(index=close.index, columns=close.columns) for name, factor in factors.items()}
-
-    def _build_market_features(
-        self,
-        close_all: pd.DataFrame,
-        volume_all: pd.DataFrame | None,
-        etf_symbols: list[object],
-    ) -> pd.DataFrame:
-        usable_etfs = [symbol for symbol in etf_symbols if symbol in close_all.columns]
-        proxy = close_all[usable_etfs] if usable_etfs else close_all
-        returns = proxy.pct_change(fill_method=None)
-        market_return = returns.mean(axis=1)
-        market_level = (1.0 + market_return.fillna(0.0)).cumprod()
-
-        features = pd.DataFrame(index=close_all.index)
-        for window in (5, 21, 63):
-            features[f"market_ret_{window}d"] = market_level.pct_change(window, fill_method=None)
-        for window in (21, 63):
-            # market_vol 使用年化口径，便于不同窗口之间比较。
-            features[f"market_vol_{window}d"] = (
-                market_return.rolling(window, min_periods=max(5, window // 3)).std() * np.sqrt(252)
-            )
-
-        rolling_peak = market_level.rolling(63, min_periods=21).max()
-        features["market_drawdown_63d"] = market_level / rolling_peak - 1.0
-        for window in (21, 63):
-            sector_ret = proxy.pct_change(window, fill_method=None)
-            features[f"sector_dispersion_{window}d"] = sector_ret.std(axis=1)
-            valid_count = sector_ret.notna().sum(axis=1)
-            positive_count = sector_ret.gt(0).sum(axis=1)
-            # 全 NaN 时表示没有可用板块收益，不能误记为 0% 上涨宽度。
-            features[f"sector_breadth_{window}d"] = positive_count / valid_count.replace(0, np.nan)
-            features[f"sector_avg_corr_{window}d"] = self._rolling_avg_corr(returns, window)
-            features[f"top3_minus_bottom3_sector_ret_{window}d"] = self._top_bottom_spread(sector_ret)
-
-        for window in (21, 63):
-            features[f"growth_defensive_ret_{window}d"] = self._group_relative_return(
-                close_all,
-                self.GROWTH_ETFS,
-                self.DEFENSIVE_ETFS,
-                window,
-            )
-            features[f"cyclical_defensive_ret_{window}d"] = self._group_relative_return(
-                close_all,
-                self.CYCLICAL_ETFS,
-                self.DEFENSIVE_ETFS,
-                window,
-            )
-
-        if volume_all is not None:
-            volume_proxy = volume_all[[symbol for symbol in usable_etfs if symbol in volume_all.columns]]
-            if volume_proxy.empty:
-                volume_proxy = volume_all
-            total_volume = volume_proxy.sum(axis=1, min_count=1)
-            vol_mean = total_volume.rolling(21, min_periods=10).mean()
-            vol_std = total_volume.rolling(21, min_periods=10).std()
-            features["market_volume_zscore_21d"] = (total_volume - vol_mean) / vol_std.replace(0, np.nan)
-
-        return features.replace([np.inf, -np.inf], np.nan)
 
     def _compute_factor_returns(
         self,
@@ -353,106 +176,6 @@ class OrdinalFactorRotation(BaseFactor):
         return data[column].unstack(Col.SYMBOL).sort_index()
 
     @staticmethod
-    def _align_fundamentals(
-        fundamental_data: pd.DataFrame | None,
-        close: pd.DataFrame,
-    ) -> pd.DataFrame | None:
-        if fundamental_data is None or fundamental_data.empty:
-            return None
-        aligned = fundamental_data.copy()
-        if isinstance(aligned.index, pd.MultiIndex):
-            dates = pd.to_datetime(aligned.index.get_level_values(Col.DATE))
-            aligned = aligned.copy()
-            aligned.index = pd.MultiIndex.from_arrays(
-                [dates, aligned.index.get_level_values(Col.SYMBOL)],
-                names=[Col.DATE, Col.SYMBOL],
-            )
-        return aligned.sort_index()
-
-    def _fundamental_panel(
-        self,
-        fundamental_data: pd.DataFrame | None,
-        column: str,
-        close: pd.DataFrame,
-    ) -> pd.DataFrame | None:
-        if fundamental_data is None or column not in fundamental_data.columns:
-            return None
-        panel = fundamental_data[column].unstack(Col.SYMBOL)
-        panel = panel.apply(pd.to_numeric, errors="coerce")
-        if isinstance(panel.index, pd.DatetimeIndex) and isinstance(close.index, pd.DatetimeIndex):
-            target_tz = close.index.tz
-            source_tz = panel.index.tz
-            if target_tz is not None and source_tz is None:
-                panel.index = panel.index.tz_localize(target_tz)
-            elif target_tz is None and source_tz is not None:
-                panel.index = panel.index.tz_convert(None)
-            elif target_tz is not None and source_tz is not None and target_tz != source_tz:
-                panel.index = panel.index.tz_convert(target_tz)
-        panel = panel.sort_index()
-        full_index = panel.index.union(close.index)
-        panel = panel.reindex(full_index).sort_index().ffill()
-        return panel.reindex(index=close.index, columns=close.columns)
-
-    def _first_available_fundamental(
-        self,
-        fundamental_data: pd.DataFrame | None,
-        columns: list[str],
-        close: pd.DataFrame,
-    ) -> pd.DataFrame | None:
-        for column in columns:
-            panel = self._fundamental_panel(fundamental_data, column, close)
-            if panel is not None:
-                return panel
-        return None
-
-    def _revenue_growth(self, revenue: pd.DataFrame | None, blank: pd.DataFrame) -> pd.DataFrame:
-        if revenue is None:
-            return blank.copy()
-        if revenue.dropna(how="all").empty:
-            return blank.copy()
-        return revenue.pct_change(self.FUNDAMENTAL_DELTA_WINDOW, fill_method=None)
-
-    def _build_turnover_proxy(self, market_data: pd.DataFrame, close: pd.DataFrame) -> pd.DataFrame:
-        for column in (Col.TURNOVER, "turnover", Col.AMOUNT, "amount", Col.VOLUME, "volume"):
-            panel = self._unstack_optional(market_data, column)
-            if panel is not None:
-                panel = panel.reindex(index=close.index, columns=close.columns)
-                if column in (Col.TURNOVER, "turnover"):
-                    return panel
-                if column in (Col.AMOUNT, "amount", Col.VOLUME, "volume"):
-                    # amount / volume 不是换手率，需相对自身长期均量/成交额去量纲。
-                    base = panel.rolling(252, min_periods=20).mean()
-                    return panel / base.replace(0, np.nan)
-        return pd.DataFrame(np.nan, index=close.index, columns=close.columns)
-
-    @staticmethod
-    def _rolling_avg_corr(returns: pd.DataFrame, window: int) -> pd.Series:
-        values = []
-        min_periods = max(5, window // 3)
-        for end in range(len(returns)):
-            start = max(0, end - window + 1)
-            sample = returns.iloc[start:end + 1].dropna(axis=1, how="all")
-            if len(sample) < min_periods or sample.shape[1] < 2:
-                values.append(np.nan)
-                continue
-            corr = sample.corr()
-            upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool)).stack()
-            values.append(upper.mean() if not upper.empty else np.nan)
-        return pd.Series(values, index=returns.index)
-
-    @staticmethod
-    def _top_bottom_spread(returns: pd.DataFrame) -> pd.Series:
-        values = []
-        for _, row in returns.iterrows():
-            row = row.dropna().sort_values()
-            if len(row) < 2:
-                values.append(np.nan)
-                continue
-            count = min(3, max(1, len(row) // 2))
-            values.append(row.tail(count).mean() - row.head(count).mean())
-        return pd.Series(values, index=returns.index)
-
-    @staticmethod
     def _group_relative_return(
         close_all: pd.DataFrame,
         left_symbols: list[str],
@@ -468,42 +191,19 @@ class OrdinalFactorRotation(BaseFactor):
         return left_ret - right_ret
 
     @staticmethod
-    def _to_monthly_market_data(market_data: pd.DataFrame) -> pd.DataFrame:
-        if market_data.empty:
-            return market_data.copy()
+    def _resolve_signal_dates(data: dict[str, pd.DataFrame], fallback_index: pd.Index) -> pd.DatetimeIndex:
+        signal_dates = data.get("signal_dates")
+        if signal_dates is None:
+            return pd.DatetimeIndex(pd.to_datetime(fallback_index)).sort_values()
+        if isinstance(signal_dates, pd.DataFrame):
+            values = signal_dates.index if Col.DATE not in signal_dates.columns else signal_dates[Col.DATE]
+        elif isinstance(signal_dates, pd.Series):
+            values = signal_dates
+        else:
+            values = signal_dates
+        return pd.DatetimeIndex(pd.to_datetime(values)).tz_localize(None).unique().sort_values()
 
-        df = market_data.reset_index().copy()
-        df[Col.DATE] = pd.to_datetime(df[Col.DATE]).dt.tz_localize(None)
-        df = df.sort_values([Col.SYMBOL, Col.DATE])
-        df["_month"] = df[Col.DATE].dt.to_period("M")
-
-        agg_map: dict[str, str] = {}
-        for column, method in (
-            (Col.DATE, "last"),
-            (Col.OPEN, "first"),
-            (Col.HIGH, "max"),
-            (Col.LOW, "min"),
-            (Col.CLOSE, "last"),
-            (Col.VOLUME, "sum"),
-            (Col.AMOUNT, "sum"),
-            (Col.ADJ_CLOSE, "last"),
-        ):
-            if column in df.columns:
-                agg_map[column] = method
-
-        monthly = (
-            df.groupby([Col.SYMBOL, "_month"], observed=True)
-            .agg(agg_map)
-            .reset_index()
-        )
-        monthly = monthly.drop(columns="_month")
-        required = [column for column in (Col.OPEN, Col.HIGH, Col.LOW, Col.CLOSE) if column in monthly.columns]
-        monthly = monthly.dropna(subset=required, how="any")
-        monthly = monthly.set_index([Col.DATE, Col.SYMBOL]).sort_index()
-        monthly.index.names = [Col.DATE, Col.SYMBOL]
-        return monthly
-
-    def _build_monthly_market_features(
+    def _build_signal_market_features(
         self,
         close_all: pd.DataFrame,
         volume_all: pd.DataFrame | None,
@@ -648,49 +348,43 @@ class OrdinalFactorRotation(BaseFactor):
         std = clipped.std(axis=1).replace(0, np.nan)
         return clipped.sub(mean, axis=0).div(std, axis=0)
 
-
-@register_factor
-class OrdinalFactorRotationEnhance(OrdinalFactorRotation):
-    name = "ordinal_factor_rotation_enhance"
-    description = "基于 Alpha158 月频子因子的序数回归轮动"
-    category = "composite"
-
-    FACTOR_NAMES = [
-        "alpha158_std60",
-        "alpha158_klen",
-        "alpha158_std20",
-        "alpha158_std30",
-        "alpha158_kup",
-        "alpha158_high0",
-        "alpha158_std10",
-        "alpha158_std5",
-        "alpha158_max5",
-        "alpha158_max10",
-    ]
-    TRAIN_WINDOW = 60
-    WEIGHT_UPDATE_INTERVAL = 1
-    MIN_AVAILABLE_FACTORS = 5
-    MIN_STOCK_FACTORS = 3
-
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
-        monthly_market = self._to_monthly_market_data(market_data)
-        close_all = monthly_market[Col.CLOSE].unstack(Col.SYMBOL).sort_index()
-        volume_all = self._unstack_optional(monthly_market, Col.VOLUME)
+        market_data = data["market"]
+        etf_data = data.get("etf", pd.DataFrame())
+        macro_data = data.get("macro", pd.DataFrame())
+
+        close_daily = market_data[Col.CLOSE].unstack(Col.SYMBOL).sort_index()
+        signal_dates = self._resolve_signal_dates(data, close_daily.index)
+        close = close_daily.reindex(signal_dates)
+        stock_symbols = list(close.columns)
+        etf_close = pd.DataFrame(index=close.index)
+        if etf_data is not None and not etf_data.empty and Col.CLOSE in etf_data.columns:
+            etf_close = etf_data[Col.CLOSE].unstack(Col.SYMBOL).sort_index().reindex(signal_dates)
+            etf_close = etf_close.loc[:, ~etf_close.columns.isin(stock_symbols)]
+
+        close_all = pd.concat([close, etf_close], axis=1).sort_index()
+        volume_daily = self._unstack_optional(market_data, Col.VOLUME)
+        volume = volume_daily.reindex(signal_dates) if volume_daily is not None else None
+        etf_volume_daily = self._unstack_optional(etf_data, Col.VOLUME) if etf_data is not None and not etf_data.empty else None
+        etf_volume = etf_volume_daily.reindex(signal_dates) if etf_volume_daily is not None else None
+        if volume is None:
+            volume_all = etf_volume
+        elif etf_volume is None:
+            volume_all = volume
+        else:
+            etf_volume = etf_volume.loc[:, ~etf_volume.columns.isin(volume.columns)]
+            volume_all = pd.concat([volume, etf_volume], axis=1).sort_index()
+
+        if not stock_symbols:
+            raise ValueError("ordinal_factor_rotation_enhance 无可用股票标的")
+        etf_symbols = list(etf_close.columns)
         if volume_all is not None:
             volume_all = volume_all.reindex(index=close_all.index, columns=close_all.columns)
 
-        all_symbols = list(close_all.columns)
-        etf_symbols = [symbol for symbol in all_symbols if self._is_etf_symbol(str(symbol))]
-        stock_symbols = [symbol for symbol in all_symbols if symbol not in etf_symbols]
-        if not stock_symbols:
-            raise ValueError("ordinal_factor_rotation_enhance 无可用股票标的")
-
-        close = close_all[stock_symbols]
-        factor_dict = self._compute_alpha158_sub_factors(monthly_market, close)
+        factor_dict = self._compute_alpha158_sub_factors(market_data, close)
         available = [name for name, factor in factor_dict.items() if not factor.dropna(how="all").empty]
         if len(available) < self.MIN_AVAILABLE_FACTORS:
             raise ValueError(
@@ -698,7 +392,7 @@ class OrdinalFactorRotationEnhance(OrdinalFactorRotation):
             )
 
         stock_returns_forward = close.pct_change(fill_method=None).shift(-1)
-        market_features = self._build_monthly_market_features(close_all, volume_all, etf_symbols)
+        market_features = self._build_signal_market_features(close_all, volume_all, etf_symbols)
         factor_returns = self._compute_factor_returns(
             factor_dict,
             stock_returns_forward,
@@ -715,17 +409,18 @@ class OrdinalFactorRotationEnhance(OrdinalFactorRotation):
         signals.index.name = Col.DATE
         signals.columns.name = Col.SYMBOL
 
-        self.last_monthly_market_data = monthly_market
+        self.last_signal_dates = signal_dates
         self.last_market_features = market_features
         self.last_factor_dict = factor_dict
         self.last_factor_returns = factor_returns
         self.last_factor_ranks = factor_ranks
         self.last_factor_weights = factor_weights
+        self.last_macro_data = macro_data
         return signals
 
     def _compute_alpha158_sub_factors(
         self,
-        monthly_market: pd.DataFrame,
+        market_data: pd.DataFrame,
         close: pd.DataFrame,
     ) -> dict[str, pd.DataFrame]:
         blank = pd.DataFrame(np.nan, index=close.index, columns=close.columns)
@@ -737,7 +432,7 @@ class OrdinalFactorRotationEnhance(OrdinalFactorRotation):
                 factors[factor_name] = blank.copy()
                 continue
 
-            factor = factor_cls().generate_signals(monthly_market, None)
+            factor = factor_cls().generate_signals({"market": market_data})
             if not isinstance(factor, pd.DataFrame) or factor.empty:
                 factors[factor_name] = blank.copy()
                 continue

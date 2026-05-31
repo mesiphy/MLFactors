@@ -93,8 +93,11 @@ def plot_layered_returns(
                 linestyle="--",
             )
     else:
-        ax.plot(result.long_short_cumulative.index, result.long_short_cumulative.values,
-                label="Long-Short", color="black", linewidth=2, linestyle="--")
+        if not cum.empty:
+            top_group = cum.columns.max()
+            bottom_group = cum.columns.min()
+            ax.plot(cum.index, cum[top_group], label="Top Group", color="black", linewidth=2, linestyle="--")
+            ax.plot(cum.index, cum[bottom_group], label="Bottom Group", color="dimgray", linewidth=2, linestyle=":")
     ax.set_title(title)
     ax.set_xlabel("Date")
     ax.set_ylabel("Cumulative Return")
@@ -132,21 +135,29 @@ def plot_factor_report(
     benchmark_cumulative: pd.DataFrame | None = None,
     factor_name: str = "Factor",
     period: int | None = None,
+    period_label: str | None = None,
     figsize: tuple = (16, 12),
 ) -> plt.Figure:
     """综合报告图：4 合 1。"""
     n_rows = 2 if decay_series is None else 2
     n_cols = 2
     fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-    period_str = f" | Forward Period: {period}d" if period is not None else ""
+    if period_label is not None:
+        display_period = period_label
+    elif period is not None:
+        display_period = f"{period}d"
+    else:
+        display_period = None
+    period_str = f" | Forward Period: {display_period}" if display_period is not None else ""
     fig.suptitle(f"Factor Report: {factor_name}{period_str}", fontsize=14, fontweight="bold")
 
-    plot_ic_series(ic_series, title=f"IC Time Series (period={period}d)", ax=axes[0, 0])
-    plot_ic_histogram(ic_series, title=f"IC Distribution (period={period}d)", ax=axes[0, 1])
+    title_period = display_period or "unknown"
+    plot_ic_series(ic_series, title=f"IC Time Series (period={title_period})", ax=axes[0, 0])
+    plot_ic_histogram(ic_series, title=f"IC Distribution (period={title_period})", ax=axes[0, 1])
     plot_layered_returns(
         layered_result,
         benchmark_cumulative=benchmark_cumulative,
-        title=f"Layered Returns (period={period}d)",
+        title=f"Layered Returns (period={title_period})",
         ax=axes[1, 0],
     )
 

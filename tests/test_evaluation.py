@@ -114,6 +114,20 @@ class TestCalcICSeries:
         result = calc_ic_series(factor.to_frame(), returns.to_frame())
         assert isinstance(result, pd.Series)
 
+    def test_empty_alignment_returns_empty_series(self):
+        factor, returns = make_panel(n_dates=5, n_symbols=5)
+        shifted_returns = returns.copy()
+        shifted_returns.index = pd.MultiIndex.from_arrays(
+            [
+                shifted_returns.index.get_level_values(Col.DATE) + pd.Timedelta(days=365),
+                shifted_returns.index.get_level_values(Col.SYMBOL),
+            ],
+            names=[Col.DATE, Col.SYMBOL],
+        )
+        result = calc_ic_series(factor, shifted_returns)
+        assert isinstance(result, pd.Series)
+        assert result.empty
+
     def test_positive_factor_has_higher_mean_ic(self):
         """完全正相关因子应产生正平均 IC。"""
         rng = np.random.default_rng(7)
@@ -252,11 +266,46 @@ class TestCalcForwardReturns:
 # ── layered_backtest ──────────────────────────────────────────────────────────
 
 class TestLayeredBacktest:
+    @staticmethod
+    def _make_two_group_panel(
+        low_returns: list[float],
+        high_returns: list[float],
+    ) -> tuple[pd.Series, pd.Series]:
+        dates = pd.date_range("2024-01-01", periods=len(low_returns), freq="B")
+        symbols = ["S0", "S1", "S2", "S3"]
+        factor_values = []
+        return_values = []
+        index_values = []
+        for dt, low_ret, high_ret in zip(dates, low_returns, high_returns):
+            for i, symbol in enumerate(symbols):
+                index_values.append((dt, symbol))
+                factor_values.append(float(i))
+                return_values.append(low_ret if i < 2 else high_ret)
+        index = pd.MultiIndex.from_tuples(index_values, names=[Col.DATE, Col.SYMBOL])
+        return (
+            pd.Series(factor_values, index=index, name="factor"),
+            pd.Series(return_values, index=index, name="returns"),
+        )
+
     def test_returns_layered_result(self):
         factor, returns = make_panel(n_dates=40, n_symbols=30)
         from evaluation.selection.layered import LayeredResult
         result = layered_backtest(factor, returns, n_groups=5)
         assert isinstance(result, LayeredResult)
+
+    def test_multiindex_input_runs_normally(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.01, 0.02, 0.03],
+            high_returns=[0.06, 0.03, 0.05],
+        )
+        result = layered_backtest(factor, returns, n_groups=2)
+        assert not result.group_returns.empty
+
+    def test_non_multiindex_input_raises(self):
+        factor = pd.Series([1.0, 2.0, 3.0])
+        returns = pd.Series([0.01, 0.02, 0.03])
+        with pytest.raises(ValueError, match="MultiIndex"):
+            layered_backtest(factor, returns, n_groups=2)
 
     def test_n_groups_columns(self):
         factor, returns = make_panel(n_dates=40, n_symbols=30)
@@ -273,10 +322,11 @@ class TestLayeredBacktest:
         result = layered_backtest(factor, returns, n_groups=5)
         assert len(result.sharpe_ratios) == 5
 
-    def test_long_short_returns_length(self):
+    def test_long_short_leg_max_drawdown_are_finite(self):
         factor, returns = make_panel(n_dates=40, n_symbols=30)
         result = layered_backtest(factor, returns, n_groups=5)
-        assert len(result.long_short_returns) > 0
+        assert np.isfinite(result.long_max_drawdown)
+        assert np.isfinite(result.short_max_drawdown)
 
     def test_cumulative_starts_near_zero(self):
         factor, returns = make_panel(n_dates=40, n_symbols=30)
@@ -300,6 +350,125 @@ class TestLayeredBacktest:
         result = layered_backtest(factor.to_frame(), returns.to_frame(), n_groups=3)
         assert result.n_groups == 3
 
+    def test_period_1_matches_periodic_return_logic(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.01, 0.02, 0.03],
+            high_returns=[0.04, 0.05, 0.06],
+        )
+        result = layered_backtest(factor, returns, n_groups=2, period=1)
+
+        expected_group_2 = pd.Series([0.04, 0.05, 0.06], index=result.group_returns.index, name=2)
+        pd.testing.assert_series_equal(result.group_returns[2], expected_group_2)
+        expected_cumulative = (1 + expected_group_2).cumprod() - 1
+        pd.testing.assert_series_equal(result.cumulative_returns[2], expected_cumulative)
+
+        expected_annual = (1 + expected_group_2).prod() ** (252 / len(expected_group_2)) - 1
+        assert result.annual_returns[2] == pytest.approx(expected_annual)
+
+    def test_period_5_returns_are_not_divided(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.01, 0.02, 0.03],
+            high_returns=[0.06, 0.03, 0.05],
+        )
+        result = layered_backtest(factor, returns, n_groups=2, period=5)
+
+        assert result.group_returns.iloc[0, 1] == pytest.approx(0.06)
+        assert result.group_returns.iloc[0, 1] != pytest.approx(0.06 / 5)
+
+    def test_period_5_sharpe_uses_periods_per_year(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.01, 0.02, 0.03],
+            high_returns=[0.06, 0.03, 0.05],
+        )
+        result = layered_backtest(factor, returns, n_groups=2, period=5)
+        group_2 = pd.Series([0.06, 0.03, 0.05], index=result.group_returns.index)
+
+        expected = group_2.mean() / group_2.std(ddof=1) * np.sqrt(252 / 5)
+        assert result.sharpe_ratios[2] == pytest.approx(expected)
+
+    def test_period_frequency_used_for_annualization(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.01, 0.02, 0.03],
+            high_returns=[0.06, 0.03, 0.05],
+        )
+        result = layered_backtest(factor, returns, n_groups=2, period=5)
+        group_2 = pd.Series([0.06, 0.03, 0.05], index=result.group_returns.index)
+
+        expected = (1 + group_2).prod() ** ((252 / 5) / len(group_2)) - 1
+        assert result.annual_returns[2] == pytest.approx(expected)
+
+    def test_long_short_leg_max_drawdown_use_group_returns(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.10, -0.20, 0.05],
+            high_returns=[0.10, -0.10, 0.02],
+        )
+        result = layered_backtest(factor, returns, n_groups=2, period=5)
+
+        assert result.long_max_drawdown == pytest.approx(-0.10)
+        assert result.short_max_drawdown == pytest.approx(-0.05)
+
+    def test_skips_dates_with_too_few_symbols_for_groups(self):
+        dates = pd.date_range("2024-01-01", periods=3, freq="B")
+        index = pd.MultiIndex.from_product([dates, ["A", "B"]], names=[Col.DATE, Col.SYMBOL])
+        factor = pd.Series([1.0, 2.0] * len(dates), index=index)
+        returns = pd.Series([0.01, 0.02] * len(dates), index=index)
+
+        result = layered_backtest(factor, returns, n_groups=3)
+        assert result.group_returns.empty
+        assert result.long_max_drawdown == 0.0
+        assert result.short_max_drawdown == 0.0
+
+    def test_group_max_drawdown_drops_missing_group_returns(self, monkeypatch):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.01, 0.02, 0.03],
+            high_returns=[0.06, 0.03, 0.05],
+        )
+        call_count = {"value": 0}
+
+        def fake_qcut(ranks, q, labels=False, duplicates="raise"):
+            call_count["value"] += 1
+            values = [0, 0, 1, 1]
+            if call_count["value"] == 2:
+                values = [0, 0, 0, 0]
+            return pd.Series(values, index=ranks.index)
+
+        monkeypatch.setattr(pd, "qcut", fake_qcut)
+        result = layered_backtest(factor, returns, n_groups=2)
+
+        assert len(result.group_returns) == 3
+        assert result.group_returns[2].isna().sum() == 1
+        assert np.isfinite(result.long_max_drawdown)
+        assert np.isfinite(result.short_max_drawdown)
+
+    def test_top_excess_calmar_is_zero_when_annual_is_nan(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.0, 0.0, 0.0],
+            high_returns=[-3.0, 0.1, 0.1],
+        )
+        result = layered_backtest(factor, returns, n_groups=2)
+
+        assert np.isnan(result.top_excess_annual)
+        assert result.top_excess_calmar == 0.0
+
+    def test_dataframe_inputs_use_first_column(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.01, 0.02, 0.03],
+            high_returns=[0.06, 0.03, 0.05],
+        )
+        factor_df = pd.DataFrame({"factor": factor, "ignored": -factor})
+        returns_df = pd.DataFrame({"returns": returns, "ignored": -returns})
+
+        result = layered_backtest(factor_df, returns_df, n_groups=2, period=5)
+        assert result.group_returns.iloc[0, 1] == pytest.approx(0.06)
+
+    def test_period_must_be_positive(self):
+        factor, returns = self._make_two_group_panel(
+            low_returns=[0.01, 0.02, 0.03],
+            high_returns=[0.06, 0.03, 0.05],
+        )
+        with pytest.raises(ValueError):
+            layered_backtest(factor, returns, n_groups=2, period=0)
+
 
 # ── FactorReport 集成测试 ─────────────────────────────────────────────────────
 
@@ -316,12 +485,11 @@ class TestFactorReport:
         report = FactorReport(
             factor_values=factor_vals,
             market_data=mkt,
-            forward_periods=[1, 5],
             n_groups=5,
         )
         summary = report.summary()
         assert isinstance(summary, pd.DataFrame)
-        assert set(summary.index) == {1, 5}
+        assert set(summary.index) == {1}
         assert "IC_mean" in summary.columns
         assert "ICIR" in summary.columns
 
@@ -334,8 +502,52 @@ class TestFactorReport:
         cls = FactorRegistry.get("momentum_5")
         factor_vals = cls().generate_signals(mkt).stack().dropna()
 
-        report = FactorReport(factor_values=factor_vals, market_data=mkt,
-                              forward_periods=[1], n_groups=5)
+        report = FactorReport(factor_values=factor_vals, market_data=mkt, n_groups=5)
         d = report.to_dict()
         assert isinstance(d, dict)
         assert 1 in d
+
+    def test_signal_dates_use_next_trading_open_returns(self):
+        from evaluation.selection.report import FactorReport
+
+        dates = pd.bdate_range("2024-01-01", periods=5)
+        symbols = ["A", "B"]
+        opens = {
+            "A": [10.0, 11.0, 12.0, 13.0, 14.0],
+            "B": [20.0, 22.0, 24.0, 26.0, 28.0],
+        }
+        closes = {
+            "A": [10.5, 11.5, 12.5, 13.5, 14.5],
+            "B": [20.5, 22.5, 24.5, 26.5, 28.5],
+        }
+        records = []
+        for i, dt in enumerate(dates):
+            for symbol in symbols:
+                open_price = opens[symbol][i]
+                close_price = closes[symbol][i]
+                records.append({
+                    Col.DATE: dt,
+                    Col.SYMBOL: symbol,
+                    Col.OPEN: open_price,
+                    Col.HIGH: max(open_price, close_price),
+                    Col.LOW: min(open_price, close_price),
+                    Col.CLOSE: close_price,
+                    Col.VOLUME: 1.0,
+                })
+        market = pd.DataFrame(records).set_index([Col.DATE, Col.SYMBOL]).sort_index()
+        signal_dates = pd.DatetimeIndex([dates[0], dates[2], dates[4]])
+        factor_index = pd.MultiIndex.from_product([signal_dates, symbols], names=[Col.DATE, Col.SYMBOL])
+        factor_values = pd.Series([pd.NA, pd.NA, 1.5, 2.5, 1.7, 2.7], index=factor_index)
+
+        report = FactorReport(
+            factor_values=factor_values,
+            market_data=market,
+            signal_dates=signal_dates,
+        )
+
+        returns = report.fwd_returns
+        assert returns.loc[(dates[0], "A")] == pytest.approx(12.5 / 11.0 - 1.0)
+        assert returns.loc[(dates[0], "B")] == pytest.approx(24.5 / 22.0 - 1.0)
+        assert returns.loc[(dates[2], "A")] == pytest.approx(14.5 / 13.0 - 1.0)
+        assert returns.loc[(dates[2], "B")] == pytest.approx(28.5 / 26.0 - 1.0)
+        assert dates[4] not in returns.index.get_level_values(Col.DATE)

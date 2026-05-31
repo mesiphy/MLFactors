@@ -67,8 +67,7 @@ class FactorRegistry:
     @classmethod
     def generate_all(
         cls,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
+        data: dict[str, pd.DataFrame],
         factor_names: list[str] | None = None,
     ) -> pd.DataFrame:
         """批量生成因子信号，返回 MultiIndex DataFrame（列名=因子名）。"""
@@ -80,7 +79,7 @@ class FactorRegistry:
             factor_cls = cls.get(name)
             factor = factor_cls()
             logger.info("生成因子信号: {}", name)
-            results[name] = factor.generate_signals(market_data, fundamental_data).stack().rename(name)
+            results[name] = factor.generate_signals(data).stack().rename(name)
 
         return pd.DataFrame(results)
 
@@ -152,7 +151,7 @@ def register_factor(cls: Type[BaseFactor]) -> Type[BaseFactor]:
         @register_factor
         class MyFactor(BaseFactor):
             name = "my_factor"
-            def generate_signals(self, market_data, fundamental_data=None):
+            def generate_signals(self, data):
                 ...
     """
     return FactorRegistry.register(cls)

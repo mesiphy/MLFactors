@@ -11,65 +11,6 @@ from factors.registry import register_factor
 
 
 @register_factor
-class Volatility20(BaseFactor):
-    name = "volatility_20"
-    description = "20日收益率标准差"
-    category = "risk"
-
-    def generate_signals(
-        self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
-    ) -> pd.DataFrame:
-        close = market_data[Col.CLOSE].unstack(Col.SYMBOL)
-        ret = close.pct_change()
-        vol = ret.rolling(20).std()
-        vol.index.name = Col.DATE
-        vol.columns.name = Col.SYMBOL
-        return vol
-
-
-@register_factor
-class Volatility5(BaseFactor):
-    name = "volatility_5"
-    description = "5日收益率标准差"
-    category = "risk"
-
-    def generate_signals(
-        self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
-    ) -> pd.DataFrame:
-        close = market_data[Col.CLOSE].unstack(Col.SYMBOL)
-        ret = close.pct_change()
-        vol = ret.rolling(5).std()
-        vol.index.name = Col.DATE
-        vol.columns.name = Col.SYMBOL
-        return vol
-
-
-@register_factor
-class HighLowSpread20(BaseFactor):
-    name = "highlow_spread_20"
-    description = "20日最高最低价振幅均值"
-    category = "risk"
-
-    def generate_signals(
-        self,
-        market_data: pd.DataFrame,
-        fundamental_data: pd.DataFrame | None = None,
-    ) -> pd.DataFrame:
-        high = market_data[Col.HIGH].unstack(Col.SYMBOL)
-        low = market_data[Col.LOW].unstack(Col.SYMBOL)
-        close = market_data[Col.CLOSE].unstack(Col.SYMBOL)
-        spread = (high - low) / close
-        avg_spread = spread.rolling(20).mean()
-        avg_spread.index.name = Col.DATE
-        avg_spread.columns.name = Col.SYMBOL
-        return avg_spread
-
-
-@register_factor
 class Vff3(BaseFactor):
     name = "vff3"
     description = "Fama-French三因子残差年化波动率"
@@ -79,14 +20,20 @@ class Vff3(BaseFactor):
 
     def generate_signals(
         self,
-        market_data: pd.DataFrame,
+        data: dict[str, pd.DataFrame] | pd.DataFrame,
         fundamental_data: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
+        if isinstance(data, pd.DataFrame):
+            data = {"market": data, "fundamental": fundamental_data}
+        market_data = data["market"]
+        fundamental_data = data.get("fundamental")
         if fundamental_data is None or fundamental_data.empty:
             raise ValueError("vff3 因子需要 fundamental_data 提供市值和 PB 数据")
 
-        close = market_data[Col.CLOSE].unstack(Col.SYMBOL)
+        close = market_data[Col.CLOSE].unstack(Col.SYMBOL).sort_index()
+        close.index = pd.DatetimeIndex(pd.to_datetime(close.index)).tz_localize(None)
         stock_returns = close.pct_change(fill_method=None)
+        signal_dates = self._resolve_signal_dates(data.get("signal_dates"), stock_returns.index)
 
         size = self._align_to_returns(self._get_size(market_data, fundamental_data), stock_returns)
         bm = self._align_to_returns(self._get_book_to_market(fundamental_data), stock_returns)
@@ -104,21 +51,28 @@ class Vff3(BaseFactor):
             index=stock_returns.index,
         )
 
-        signals = pd.DataFrame(index=stock_returns.index, columns=stock_returns.columns, dtype=float)
+        signals = pd.DataFrame(index=signal_dates, columns=stock_returns.columns, dtype=float)
         for symbol in stock_returns.columns:
-            data = pd.concat(
+            symbol_data = pd.concat(
                 [stock_returns[symbol].rename("stock"), factor_returns],
                 axis=1,
             )
-            signals[symbol] = self._rolling_residual_vol(data)
+            signals[symbol] = self._rolling_residual_vol(symbol_data, signal_dates)
 
         signals.index.name = Col.DATE
         signals.columns.name = Col.SYMBOL
         return signals
 
-    def _rolling_residual_vol(self, data: pd.DataFrame) -> pd.Series:
-        result = pd.Series(np.nan, index=data.index, dtype=float)
-        for end in range(self.window, len(data) + 1):
+    def _rolling_residual_vol(
+        self,
+        data: pd.DataFrame,
+        signal_dates: pd.DatetimeIndex,
+    ) -> pd.Series:
+        result = pd.Series(np.nan, index=signal_dates, dtype=float)
+        for dt in signal_dates:
+            end = data.index.searchsorted(dt, side="right")
+            if end < self.window:
+                continue
             window_data = data.iloc[end - self.window:end].dropna()
             if len(window_data) < self.window:
                 continue
@@ -132,8 +86,23 @@ class Vff3(BaseFactor):
                 continue
 
             residuals = y - x @ coef
-            result.iloc[end - 1] = float(np.std(residuals, ddof=1) * np.sqrt(252))
+            result.loc[dt] = float(np.std(residuals, ddof=1) * np.sqrt(252))
         return result
+
+    @staticmethod
+    def _resolve_signal_dates(
+        signal_dates: pd.Index | pd.Series | pd.DataFrame | None,
+        fallback_index: pd.Index,
+    ) -> pd.DatetimeIndex:
+        if signal_dates is None:
+            values = fallback_index
+        elif isinstance(signal_dates, pd.DataFrame):
+            values = signal_dates[Col.DATE] if Col.DATE in signal_dates.columns else signal_dates.index
+        elif isinstance(signal_dates, pd.Series):
+            values = signal_dates
+        else:
+            values = signal_dates
+        return pd.DatetimeIndex(pd.to_datetime(values)).tz_localize(None).unique().sort_values()
 
     @staticmethod
     def _get_size(
